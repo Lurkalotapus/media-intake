@@ -273,6 +273,7 @@ class FakeGalleryDL:
         self.stdout = stdout
         self.returncode = returncode
         self.calls = 0
+        self.args = []
 
     def resolve(self):
         return "fake-gallery-dl"
@@ -282,6 +283,7 @@ class FakeGalleryDL:
 
     def run(self, args, timeout, env=None):
         self.calls += 1
+        self.args = list(args)
 
         class Result:
             pass
@@ -344,6 +346,25 @@ class FetchGateTests(unittest.TestCase):
         config = intake.build_config(cookies_from_browser="brave+gnomekeyring")
         self.assertEqual(config["extractor"]["instagram"]["cookies"], ["brave", None, "gnomekeyring", None, None])
         self.assertNotIn("cookies-from-browser", config["extractor"]["instagram"])
+
+    def test_config_keeps_per_post_directory_layout(self):
+        """-D resets `directory` to (), flattening every post into one folder."""
+        config = intake.build_config(base_directory=Path("/tmp/archive"))
+        self.assertEqual(config["base-directory"], "/tmp/archive")
+        self.assertEqual(
+            config["extractor"]["instagram"]["directory"],
+            ["instagram", "{username}", "{post_date:%Y-%m-%d}_{post_shortcode}"],
+        )
+
+    def test_fetch_never_passes_the_flat_directory_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            gdl = FakeGalleryDL()
+            intake.command_fetch(self.parse("--out", str(out)), gdl)
+        self.assertNotIn("-D", gdl.args)
+        self.assertNotIn("--directory", gdl.args)
+        self.assertIn("--config-json", gdl.args)
+        self.assertIn("--write-metadata", gdl.args)
 
     def test_cookie_file_takes_precedence(self):
         config = intake.build_config(cookies_file=Path("/tmp/cobs.txt"), cookies_from_browser="brave")

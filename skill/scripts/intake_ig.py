@@ -300,6 +300,7 @@ def build_config(
     cookies_file: Path | None = None,
     cookies_from_browser: str | None = None,
     archive: Path | None = None,
+    base_directory: Path | None = None,
     sleep_request: str = "3.0-6.0",
     sleep_429: str = "60-120",
     retries: int = 4,
@@ -307,7 +308,12 @@ def build_config(
     filename_format: str = "{num:02d}_{shortcode}.{extension}",
     videos: bool = True,
 ) -> dict[str, Any]:
-    """Build the gallery-dl config explicitly, so the rate limits are visible."""
+    """Build the gallery-dl config explicitly, so the rate limits are visible.
+
+    ``base_directory`` must be set here rather than via the ``-D`` CLI flag:
+    gallery-dl's ``-D`` also resets ``directory`` to an empty tuple, which silently
+    flattens every post into one folder and destroys per-post grouping.
+    """
     extractor: dict[str, Any] = {
         "instagram": {
             "directory": list(directory_format or ["instagram", "{username}", "{post_date:%Y-%m-%d}_{post_shortcode}"]),
@@ -324,6 +330,8 @@ def build_config(
         extractor["instagram"]["cookies"] = parse_browser_spec(cookies_from_browser)
 
     config: dict[str, Any] = {"extractor": extractor, "output": {"mode": "auto"}}
+    if base_directory:
+        config["base-directory"] = str(base_directory)
     if archive:
         config["downloader"] = {"archive": str(archive)}
     return config
@@ -462,6 +470,7 @@ def command_plan(args: argparse.Namespace, gdl: GalleryDL) -> int:
     config = build_config(
         cookies_file=Path(args.cookies).expanduser() if args.cookies else None,
         cookies_from_browser=spec,
+        base_directory=archive_dir,
         sleep_request=args.sleep_request,
         sleep_429=args.sleep_429,
     )
@@ -748,6 +757,7 @@ def command_fetch(args: argparse.Namespace, gdl: GalleryDL) -> int:
         cookies_file=cookies_file,
         cookies_from_browser=spec,
         archive=None if args.no_archive else archive_dir / "archive.sqlite3",
+        base_directory=archive_dir,
         sleep_request=args.sleep_request,
         sleep_429=args.sleep_429,
         retries=args.retries,
@@ -755,7 +765,7 @@ def command_fetch(args: argparse.Namespace, gdl: GalleryDL) -> int:
     )
     config_path = write_config(out / "gallery-dl.json", config)
 
-    argv = ["--config-json", str(config_path), "--write-metadata", "-D", str(archive_dir)]
+    argv = ["--config-json", str(config_path), "--write-metadata"]
     if args.max_posts:
         argv += ["--range", f"1-{args.max_posts}"]
     if args.images_only:
