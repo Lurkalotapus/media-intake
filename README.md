@@ -201,3 +201,5 @@ OCR's intake convention changes, these tests fail here first.
 - `skill/SKILL.md` — agent-facing operating procedure and review gates
 - `SECURITY.md` — authorisation, rate-limit, and data-handling responsibilities
 - `docs/requirements.txt` — pinned runtime
+- `LICENSE` — Apache License 2.0
+- `NOTICE` — copyright and attribution notice
