@@ -138,6 +138,21 @@ compare the draft against the media, correct proper nouns and numbers, then prom
 to a final note. Staging media does not make it knowledge, and a caption is not a
 verified quotation.
 
+## Whole-collection runs
+
+```bash
+python skill/scripts/run_full.py --out DIR --target URL --phase all \
+  --cookies-from-browser brave --keyring gnomekeyring
+```
+
+`fetch` loops through cooldowns until exhausted, `ocr` parallelises image OCR and
+skips existing drafts, `video` runs media-ocr's batch text-on-video driver. Every
+phase resumes. Clips are OCR'd into `<item>/<clip>/` beside the media, so an item
+stays self-contained. `RUN-REPORT.md` records counts, failures, and the
+"drafts are not verified text" caveat for whoever curates the output.
+
+Launch it detached for overnight work; it survives the session that started it.
+
 ## Re-projecting without network
 
 `project` rebuilds `_inbox/` from `_archive/` and needs neither gallery-dl nor a

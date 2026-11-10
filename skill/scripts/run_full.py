@@ -11,7 +11,8 @@ Phases
 ------
 fetch   Loop intake_ig until the target is exhausted, sleeping out cooldowns.
 ocr     OCR every image-bearing inbox directory that has no draft yet.
-all     fetch, then ocr.
+video   Batch text-on-video OCR over clips (media-ocr's ocr_video_batch.py).
+all     fetch, then ocr, then video.
 
 Nothing here is destructive: it never deletes media, never overwrites a reviewed
 final note, and re-running skips work already done.
@@ -237,11 +238,42 @@ def ocr_phase(args: argparse.Namespace, out: Path, log_path: Path) -> dict[str, 
 
 
 # --------------------------------------------------------------------------
+# video phase
+# --------------------------------------------------------------------------
+
+
+def video_phase(args: argparse.Namespace, out: Path, log_path: Path) -> dict[str, Any]:
+    """Batch text-on-video OCR, delegated to media-ocr's own driver."""
+    media_ocr = Path(args.media_ocr or DEFAULT_MEDIA_OCR)
+    batch_script = media_ocr.with_name("ocr_video_batch.py")
+    if not batch_script.is_file():
+        return {"ok": False, "reason": f"ocr_video_batch.py not found beside {media_ocr}"}
+    python = args.ocr_python or str(media_ocr.parents[2] / ".venv" / "bin" / "python")
+    report = out / "_video-ocr-report.json"
+    command = [
+        python, str(batch_script),
+        "--input", str(out / "_inbox"),
+        "--workers", str(args.video_workers),
+        "--threads", str(args.ocr_threads),
+        "--timeout", str(args.ocr_timeout),
+        "--report", str(report),
+    ]
+    log(f"video phase: starting with {args.video_workers} worker(s)", log_path)
+    result = subprocess.run(command, capture_output=True, text=True, timeout=args.video_phase_timeout)
+    log(f"video phase exit {result.returncode}: {(result.stdout or '').strip().splitlines()[-1] if result.stdout else ''}", log_path)
+    payload = read_json(report, {})
+    if not payload:
+        return {"ok": False, "reason": "no report produced", "stderr_tail": (result.stderr or "")[-800:]}
+    payload["ok"] = result.returncode == 0
+    return payload
+
+
+# --------------------------------------------------------------------------
 # report
 # --------------------------------------------------------------------------
 
 
-def write_report(out: Path, fetch: dict[str, Any], ocr: dict[str, Any] | None, args: argparse.Namespace) -> Path:
+def write_report(out: Path, fetch: dict[str, Any], ocr: dict[str, Any] | None, args: argparse.Namespace, video: dict[str, Any] | None = None) -> Path:
     inbox = out / "_inbox"
     directories = item_dirs(inbox)
     images = videos = 0
@@ -272,6 +304,7 @@ def write_report(out: Path, fetch: dict[str, Any], ocr: dict[str, Any] | None, a
         f"- Fetch: {'complete' if fetch.get('ok') else 'incomplete — ' + str(fetch.get('reason'))}"
         f" ({fetch.get('rounds', 0)} round(s))",
         f"- OCR: {'complete' if ocr and ocr.get('ok') else 'incomplete' if ocr else 'not requested'}",
+        *([f"- Video OCR: {'complete' if video.get('ok') else 'incomplete'} ({video.get('videos_ok', 0)} clip(s))"] if video else []),
         "",
         "## Library contents",
         "",
@@ -281,6 +314,7 @@ def write_report(out: Path, fetch: dict[str, Any], ocr: dict[str, Any] | None, a
         f"| Image files | {images} |",
         f"| Video files | {videos} |",
         f"| OCR drafts written | {drafts} |",
+        *([f"| Video clips OCR'd | {video.get('videos_ok', 0)} ({video.get('frames_retained', 0)} frame(s)) |"] if video else []),
         "",
         "## Layout",
         "",
@@ -326,7 +360,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="run_full", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--target", required=True)
     parser.add_argument("--out", required=True)
-    parser.add_argument("--phase", choices=["fetch", "ocr", "all"], default="all")
+    parser.add_argument("--phase", choices=["fetch", "ocr", "video", "all"], default="all")
     parser.add_argument("--cookies-from-browser")
     parser.add_argument("--keyring")
     parser.add_argument("--cookies")
@@ -340,6 +374,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--workers", type=int, default=6)
     parser.add_argument("--ocr-threads", type=int, default=4)
     parser.add_argument("--ocr-timeout", type=int, default=900)
+    parser.add_argument("--video-workers", type=int, default=3, help="clips processed concurrently (default 3)")
+    parser.add_argument("--video-phase-timeout", type=int, default=86400, help="whole video phase cap in seconds")
     parser.add_argument("--ocr-python", help="python with rapidocr (defaults to media-ocr's venv)")
     parser.add_argument("--media-ocr", help="path to media-ocr's ocr_batch.py")
     args = parser.parse_args(argv)
@@ -362,12 +398,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         ocr = ocr_phase(args, out, log_path)
         log(f"ocr result: {json.dumps(ocr)[:400]}", log_path)
 
-    report = write_report(out, fetch, ocr, args)
+    video: dict[str, Any] | None = None
+    if args.phase in {"video", "all"}:
+        video = video_phase(args, out, log_path)
+        log(f"video result: {json.dumps(video)[:400]}", log_path)
+
+    report = write_report(out, fetch, ocr, args, video)
     log(f"report written: {report}", log_path)
     log("=== run_full exit", log_path)
     if args.phase == "all" and not fetch.get("ok"):
         return 1
     if ocr and not ocr.get("ok"):
+        return 1
+    if video and not video.get("ok"):
         return 1
     return 0
 

@@ -100,6 +100,27 @@ explicitly, because that is the difference between a sample and an archive.
 run* from posts *skipped*. That is deliberate: "downloaded 131" is not the same
 claim as "the collection had 143 items".
 
+## Whole-collection runs
+
+`run_full.py` chains the phases and is resumable at each of them:
+
+```bash
+python skill/scripts/run_full.py --out DIR --target URL --phase all \
+  --cookies-from-browser brave --keyring gnomekeyring
+```
+
+| Phase | Does |
+|---|---|
+| `fetch` | loops through cooldowns until the target is exhausted |
+| `ocr` | image OCR over item dirs in parallel, skipping existing drafts |
+| `video` | text-on-video OCR via media-ocr's `ocr_video_batch.py` |
+| `all` | fetch, then ocr, then video |
+
+Each clip becomes a sibling of its own media (`<item>/01/`), so an item directory
+stays self-contained. Videos are deferred by default because sampling every frame
+of a thousand Reels is hours of CPU; run `--phase video` when you want them.
+`RUN-REPORT.md` is rewritten at the end with real counts, failures, and caveats.
+
 ## Rate limits: the retry timer
 
 There are two layers, because they answer different questions.
