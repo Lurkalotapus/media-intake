@@ -142,7 +142,7 @@ escalates only when you keep being refused.
 ### Setting expectations on scale
 
 `--sleep-request 3.0-6.0` applies per HTTP request, and each media file is one
-request. As a rule of thumb: **1000 files ≈ 1.2-1.7 hours**, so a large saved
+request. As a rule of thumb: **1000 files ≈ 0.8-1.7 hours**, so a large saved
 collection is an overnight job, not a coffee break. Run `plan --all` first to get
 the real count, then decide whether to take the whole thing or one named
 collection. `--images-only` roughly halves it by skipping video.

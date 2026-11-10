@@ -67,7 +67,7 @@ how many posts, how many media files, how many videos, and the date range. If th
 sample already shows hundreds of posts, confirm scale before fetching. `--all`
 enumerates the entire target (metadata only) — use it when the operator asks "how
 big is this", and caveat the runtime: each media file is one HTTP request, so about
-1000 files ≈ 1.2-1.7 hours at the default `--sleep-request`.
+1000 files ≈ 0.8-1.7 hours at the default `--sleep-request`.
 
 `plan` returns non-zero when gallery-dl reported an error, **even if the exit code
 was 0** — gallery-dl reports an auth redirect as `AbortExtraction` while exiting
