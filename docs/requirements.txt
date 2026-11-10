@@ -2,3 +2,12 @@
 
 # Acquisition stage (network, auth, per-post metadata sidecars)
 gallery-dl==1.32.19
+
+# Video/Reel downloads: gallery-dl delegates DASH media to yt-dlp.
+# Without it, video posts log "Cannot import yt-dlp" and fail.
+yt-dlp==2026.10.26
+
+# Chromium-family cookie decryption on Linux (Brave/Chrome/Chromium).
+# gallery-dl cannot read v11-encrypted cookies without it and silently
+# extracts zero cookies.
+secretstorage==3.5.0

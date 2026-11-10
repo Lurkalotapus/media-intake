@@ -9,6 +9,7 @@ import json
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -226,6 +227,138 @@ class ProjectionTests(unittest.TestCase):
             records, _, _ = intake.project([item], root / "_inbox", mode_label="saved", acquisition="test")
             staged = root / "_inbox" / records[0]["inbox_dir"] / "01.jpg"
             self.assertEqual(staged.stat().st_ino, item.media[0].stat().st_ino)
+
+
+class CooldownTests(unittest.TestCase):
+    def test_ladder_escalates_and_caps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            waits = []
+            for _ in range(8):
+                state = intake.record_rate_limit(out, reason="429")
+                waits.append(state["seconds"])
+        self.assertEqual(waits[:6], list(intake.COOLDOWN_LADDER_SECONDS))
+        self.assertEqual(waits[-1], intake.COOLDOWN_LADDER_SECONDS[-1])
+
+    def test_cooldown_expiry(self):
+        now = datetime.now(timezone.utc)
+        future = {"until": (now + timedelta(seconds=120)).replace(microsecond=0).isoformat()}
+        past = {"until": (now - timedelta(seconds=120)).replace(microsecond=0).isoformat()}
+        self.assertGreater(intake.cooldown_remaining(future, now=now), 60)
+        self.assertLessEqual(intake.cooldown_remaining(past, now=now), 0)
+        self.assertEqual(intake.cooldown_remaining(None), 0.0)
+
+    def test_clean_run_clears_and_archives(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            intake.record_rate_limit(out, reason="429")
+            self.assertTrue(intake.clear_rate_limit(out))
+            self.assertIsNone(intake.read_cooldown(out))
+            history = (out / "rate-limit-history.jsonl").read_text(encoding="utf-8").strip().splitlines()
+        self.assertEqual(len(history), 1)
+        self.assertIn("cleared_at", json.loads(history[0]))
+
+    def test_markers(self):
+        self.assertTrue(intake.is_rate_limited("[instagram][error] HttpError: '429 Too Many Requests'"))
+        self.assertTrue(intake.is_rate_limited("Please wait a few minutes before you try again."))
+        self.assertFalse(intake.is_rate_limited("HTTP redirect to login page"))
+
+
+class FakeGalleryDL:
+    """Counts invocations so tests can prove nothing reached the network."""
+
+    def __init__(self, *, version="1.32.19-test", stderr="", stdout="", returncode=0):
+        self.version = version
+        self.stderr = stderr
+        self.stdout = stdout
+        self.returncode = returncode
+        self.calls = 0
+
+    def resolve(self):
+        return "fake-gallery-dl"
+
+    def probe_version(self):
+        return self.version
+
+    def run(self, args, timeout, env=None):
+        self.calls += 1
+
+        class Result:
+            pass
+
+        result = Result()
+        result.stdout = self.stdout
+        result.stderr = self.stderr
+        result.returncode = self.returncode
+        return result
+
+
+class FetchGateTests(unittest.TestCase):
+    def parse(self, *extra):
+        parser = intake.build_parser()
+        return parser.parse_args(["fetch", "--target", "https://www.instagram.com/u/saved/all-posts/", "--cookies-from-browser", "brave", "--keyring", "gnomekeyring", *extra])
+
+    def test_active_cooldown_blocks_before_any_network_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            intake.record_rate_limit(out, reason="previous 429")
+            args = self.parse("--out", str(out))
+            gdl = FakeGalleryDL()
+            with self.assertRaises(intake.IntakeError) as caught:
+                intake.command_fetch(args, gdl)
+            self.assertEqual(gdl.calls, 0)  # nothing ran
+            self.assertIn("cooldown active", str(caught.exception).lower())
+
+    def test_force_overrides_cooldown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            intake.record_rate_limit(out, reason="previous 429")
+            args = self.parse("--out", str(out), "--force")
+            gdl = FakeGalleryDL()
+            intake.command_fetch(args, gdl)
+        self.assertEqual(gdl.calls, 1)
+
+    def test_429_records_cooldown_and_fails_loudly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            args = self.parse("--out", str(out))
+            gdl = FakeGalleryDL(stderr="[instagram][error] HttpError: '429 Too Many Requests'", returncode=1)
+            with self.assertRaises(intake.IntakeError):
+                intake.command_fetch(args, gdl)
+            state = intake.read_cooldown(out)
+            manifest = json.loads((out / "intake-manifest.json").read_text(encoding="utf-8"))
+        self.assertIsNotNone(state)
+        self.assertTrue(manifest["rate_limited"])
+        self.assertEqual(manifest["attempt"], 1)
+
+    def test_browser_spec_composition(self):
+        self.assertEqual(intake.browser_spec("brave", "gnomekeyring"), "brave+gnomekeyring")
+        self.assertEqual(intake.browser_spec("brave+gnomekeyring", "gnomekeyring"), "brave+gnomekeyring")
+        self.assertEqual(intake.browser_spec("firefox", None), "firefox")
+        self.assertIsNone(intake.browser_spec(None, "gnomekeyring"))
+
+    def test_browser_spec_parses_into_gallery_dl_cookie_list(self):
+        """gallery-dl ignores a 'cookies-from-browser' config key; it wants the list."""
+        self.assertEqual(intake.parse_browser_spec("brave+gnomekeyring"), ["brave", None, "gnomekeyring", None, None])
+        self.assertEqual(intake.parse_browser_spec("firefox"), ["firefox", None, None, None, None])
+        config = intake.build_config(cookies_from_browser="brave+gnomekeyring")
+        self.assertEqual(config["extractor"]["instagram"]["cookies"], ["brave", None, "gnomekeyring", None, None])
+        self.assertNotIn("cookies-from-browser", config["extractor"]["instagram"])
+
+    def test_cookie_file_takes_precedence(self):
+        config = intake.build_config(cookies_file=Path("/tmp/cobs.txt"), cookies_from_browser="brave")
+        self.assertEqual(config["extractor"]["instagram"]["cookies"], "/tmp/cobs.txt")
+
+    def test_keyring_env_only_when_unset(self):
+        import os
+
+        original = os.environ.pop("XDG_CURRENT_DESKTOP", None)
+        try:
+            self.assertEqual(intake.keyring_env("brave+gnomekeyring"), {"XDG_CURRENT_DESKTOP": "GNOME"})
+            self.assertIsNone(intake.keyring_env("firefox"))
+        finally:
+            if original is not None:
+                os.environ["XDG_CURRENT_DESKTOP"] = original
 
 
 @unittest.skipUnless((MEDIA_OCR_SCRIPTS / "ocr_batch.py").is_file(), "media-ocr sibling project not present")

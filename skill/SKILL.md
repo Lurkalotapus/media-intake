@@ -39,12 +39,20 @@ fetch on an assumption.
 
 ```bash
 export GALLERY_DL_BINARY="$PWD/.venv/bin/gallery-dl"
-python skill/scripts/intake_ig.py check --cookies-from-browser firefox
+python skill/scripts/intake_ig.py check \
+  --cookies-from-browser brave --keyring gnomekeyring
 ```
 
 `check` verifies the binary, its version, and whether auth material is present. It
 exits non-zero when no cookies are supplied, because only public targets could then
 work — and on Instagram, usually not even those.
+
+**Chromium-family browsers on Linux need `--keyring gnomekeyring`.** Their cookie
+values are v11-encrypted with a key held in the OS keyring, and gallery-dl's
+desktop-environment auto-detection falls back to `basictext` when the shell has no
+`XDG_CURRENT_DESKTOP`, finds no key, and reports "Extracted 0 cookies" while the
+request then fails as a login redirect. The tool forces the desktop hint when a
+keyring is named, and requires `secretstorage` in the environment.
 
 ### 2. Plan the target, always
 
@@ -56,7 +64,10 @@ python skill/scripts/intake_ig.py plan \
 
 `plan` enumerates a sample without downloading media. Report to the operator:
 how many posts, how many media files, how many videos, and the date range. If the
-sample already shows hundreds of posts, confirm scale before fetching.
+sample already shows hundreds of posts, confirm scale before fetching. `--all`
+enumerates the entire target (metadata only) — use it when the operator asks "how
+big is this", and caveat the runtime: each media file is one HTTP request, so about
+1000 files ≈ 1.2-1.7 hours at the default `--sleep-request`.
 
 `plan` returns non-zero when gallery-dl reported an error, **even if the exit code
 was 0** — gallery-dl reports an auth redirect as `AbortExtraction` while exiting
@@ -77,6 +88,26 @@ python skill/scripts/intake_ig.py fetch \
 - Downloads are recorded in `_archive/archive.sqlite3`, so a re-run resumes instead
   of re-fetching. Do not use `--no-archive` for anything you may need to resume.
 - Media is hardlinked into `_inbox/`, not copied, where the filesystem allows it.
+
+### 3b. Rate limits: the cross-run cooldown
+
+Two layers, and they are not the same thing:
+
+- **Inside a run**, gallery-dl retries a 429 `--retries` times (default 4) with
+  `--sleep-429` (default 60-120s) between tries. It does not read `Retry-After`,
+  so it cannot match the platform's stated limit; that layer buys roughly 4-8
+  minutes of tolerance.
+- **Across runs**, the tool persists a ladder at `<out>/cooldown.json` — 5m, 15m,
+  30m, 2h, 6h, 12h for consecutive 429s. A 429 records the cooldown and exits
+  non-zero with the resume time; a later `fetch` refuses to start while it is live;
+  one clean run clears it and resets the ladder.
+
+`--auto-retry N` waits out the cooldown and resumes for up to N extra attempts,
+capped by `--max-wait` (default 3600s per wait). `status` reports cooldown state,
+archive size, and inbox size at any time.
+
+Never respond to a 429 by lowering `--sleep-request`, raising concurrency, or
+rotating sessions. Wait, then resume — the archive makes resuming cheap.
 
 ### 4. Read the manifest before reporting success
 
@@ -123,8 +154,9 @@ Existing inbox directories are skipped, keyed by `post_shortcode` in each
 
 | Symptom | Cause | Response |
 |---|---|---|
-| `AbortExtraction` / "redirect to login page" | No usable session | Export cookies from a logged-in browser; retry `plan` first |
-| `429 Too Many Requests` | Rate limited | Stop. Wait minutes to hours. Lower `--max-posts`, raise `--sleep-request` |
+| `AbortExtraction` / "redirect to login page" | No usable session, or cookies extracted as 0 | Check the keyring: Chromium-family browsers need `--keyring gnomekeyring` and `secretstorage` installed |
+| `429 Too Many Requests` | Rate limited | Run stops and records a cooldown. Wait it out; `--auto-retry N` to resume automatically |
+| `Cannot import yt-dlp` | Missing video dependency | `uv pip install --python .venv/bin/python yt-dlp` |
 | 0 posts, exit 0, no errors | Target empty, or session lacks access to that collection | Verify the collection id in a browser |
 | Sidecars but no inbox dirs | Media not written, or unsupported suffix | Check `skipped[]` reasons in the manifest |
 | `Checkpoint` / `consent` in stderr | Instagram wants interactive confirmation | Resolve in a browser session; automated tools cannot consent |

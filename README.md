@@ -39,24 +39,37 @@ export GALLERY_DL_BINARY="$PWD/.venv/bin/gallery-dl"   # or put gallery-dl on PA
 ## Use
 
 Saved posts and named collections are visible only to the account that saved
-them, so a session is mandatory:
+them, so a session is mandatory. On Linux, Chromium-family browsers (Brave,
+Chrome, Chromium) encrypt cookie values with an OS keyring key — pass
+`--keyring gnomekeyring` or gallery-dl silently extracts **zero** cookies and
+every request looks like a login wall:
 
 ```bash
 # 1. Preflight
-.venv/bin/python skill/scripts/intake_ig.py check --cookies-from-browser firefox
+.venv/bin/python skill/scripts/intake_ig.py check \
+  --cookies-from-browser brave --keyring gnomekeyring
 
 # 2. Look before you leap — no media downloaded
 .venv/bin/python skill/scripts/intake_ig.py plan \
   --target "https://www.instagram.com/YOUR_USER/saved/all-posts/" \
-  --cookies-from-browser firefox
+  --cookies-from-browser brave --keyring gnomekeyring
+
+# 2b. ...or count the whole pile first (metadata only, slower)
+.venv/bin/python skill/scripts/intake_ig.py plan \
+  --target "https://www.instagram.com/YOUR_USER/saved/all-posts/" \
+  --cookies-from-browser brave --keyring gnomekeyring --all
 
 # 3. Collect one whole saved folder
 .venv/bin/python skill/scripts/intake_ig.py fetch \
   --target "https://www.instagram.com/YOUR_USER/saved/Recipes/17895695668004550/" \
   --out ~/Documents/knowledge-vault/Inbox/media/_instagram \
-  --cookies-from-browser firefox --all
+  --cookies-from-browser brave --keyring gnomekeyring --all --auto-retry 3
 
-# 4. OCR it with Media OCR, one item directory at a time
+# 4. Check cooldown / progress
+.venv/bin/python skill/scripts/intake_ig.py status \
+  --out ~/Documents/knowledge-vault/Inbox/media/_instagram
+
+# 5. OCR it with Media OCR, one item directory at a time
 .venv/bin/python ../media-ocr/skill/scripts/ocr_batch.py \
   --input ~/Documents/knowledge-vault/Inbox/media/_instagram/_inbox/<item-dir>
 ```
@@ -86,6 +99,53 @@ explicitly, because that is the difference between a sample and an archive.
 `intake-manifest.json` distinguishes posts *in the archive* from posts *staged this
 run* from posts *skipped*. That is deliberate: "downloaded 131" is not the same
 claim as "the collection had 143 items".
+
+## Rate limits: the retry timer
+
+There are two layers, because they answer different questions.
+
+**Inside one run** gallery-dl retries a 429 up to `--retries` (default 4) times,
+waiting `--sleep-429` (default 60-120s) between tries. It does **not** read the
+platform's `Retry-After` header — Instagram does not publish a usable one on this
+path — so that layer is a fixed schedule, not a matched one. Roughly 4-8 minutes
+of tolerance before it gives up.
+
+**Across runs** this tool keeps a cooldown at `<out>/cooldown.json`, because
+gallery-dl's in-run retries cannot see that you were blocked ten minutes ago:
+
+| Consecutive 429s | Cooldown |
+|---|---|
+| 1 | 5 min |
+| 2 | 15 min |
+| 3 | 30 min |
+| 4 | 2 h |
+| 5 | 6 h |
+| 6+ | 12 h |
+
+- A 429 records (or escalates) the cooldown and the run exits non-zero with the
+  resume time. Nothing silently pretends to have finished.
+- The next `fetch` refuses to start while a cooldown is live, and tells you how
+  long is left. `status` shows it at any time.
+- `--auto-retry N` waits out the cooldown and resumes, up to N extra attempts.
+  `--max-wait` (default 3600s) caps any single wait, so it will not sit for six
+  hours inside one command.
+- One clean run clears the cooldown and resets the ladder, appending the cleared
+  record to `rate-limit-history.jsonl`.
+- Resuming is cheap and safe: the download archive means already-fetched media is
+  never requested twice.
+
+Why a ladder rather than "wait exactly what the server says": matching a limit you
+cannot read is guesswork, and repeated retries against a throttle are what turn a
+temporary block into a longer one. The ladder is deliberately conservative and
+escalates only when you keep being refused.
+
+### Setting expectations on scale
+
+`--sleep-request 3.0-6.0` applies per HTTP request, and each media file is one
+request. As a rule of thumb: **1000 files ≈ 1.2-1.7 hours**, so a large saved
+collection is an overnight job, not a coffee break. Run `plan --all` first to get
+the real count, then decide whether to take the whole thing or one named
+collection. `--images-only` roughly halves it by skipping video.
 
 ## Limits you should expect
 
