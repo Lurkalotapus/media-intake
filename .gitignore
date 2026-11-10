@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+.ruff_cache/
+.pytest_cache/
+
+# Collected media and per-run manifests are local data, never committed.
+_archive/
+_inbox/
+intake-manifest.json
+runs.jsonl
+gallery-dl.json
+
+# Credentials
+cookies*.txt
+*.cookies

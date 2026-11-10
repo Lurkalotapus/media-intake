@@ -1,0 +1,4 @@
+# Runtime dependencies
+
+# Acquisition stage (network, auth, per-post metadata sidecars)
+gallery-dl==1.32.19

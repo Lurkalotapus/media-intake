@@ -1,0 +1,18 @@
+[project]
+name = "media-intake"
+version = "0.1.0"
+description = "Instagram acquisition stage that stages media into Media OCR's intake layout"
+readme = "README.md"
+requires-python = ">=3.14,<3.15"
+dependencies = ["gallery-dl==1.32.19"]
+
+[tool.pytest.ini_options]
+testpaths = ["skill/scripts"]
+python_files = ["test_*.py"]
+
+[tool.ruff]
+line-length = 240
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
