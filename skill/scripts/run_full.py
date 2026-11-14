@@ -22,8 +22,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -154,6 +156,34 @@ def fetch_phase(args: argparse.Namespace, out: Path, log_path: Path) -> dict[str
 # --------------------------------------------------------------------------
 
 
+
+def cpu_slices(total_cores: int, per_worker: int, workers: int) -> list[str]:
+    """Split cores into per-worker taskset ranges.
+
+    OCR processes size their ONNX thread pool from the core count and ignore
+    OMP_NUM_THREADS, so N workers oversubscribe the box by roughly N times.
+    Pinning each worker to a fixed slice bounds the total CPU to core count.
+    """
+    per_worker = max(1, per_worker)
+    usable = min(total_cores, per_worker * max(1, workers))
+    ranges = []
+    for index in range(max(1, workers)):
+        start = index * per_worker
+        if start >= usable:
+            break
+        ranges.append(f"{start}-{min(start + per_worker, usable) - 1}")
+    return ranges or [f"0-{max(0, total_cores - 1)}"]
+
+
+def pinned_command(command: list[str], cpu_range: str | None) -> list[str]:
+    if not cpu_range:
+        return command
+    taskset = shutil.which("taskset")
+    if not taskset:
+        return command
+    return [taskset, "-c", cpu_range, *command]
+
+
 def item_dirs(inbox: Path) -> list[Path]:
     if not inbox.is_dir():
         return []
@@ -173,7 +203,7 @@ def classify_item(directory: Path) -> tuple[int, int]:
     return images, videos
 
 
-def ocr_one(directory: Path, media_ocr: Path, python: str, threads: int, timeout: int) -> dict[str, Any]:
+def ocr_one(directory: Path, media_ocr: Path, python: str, threads: int, timeout: int, cpu_range: str | None = None) -> dict[str, Any]:
     output = directory / "ocr-output"
     draft = output / "ocr-draft.md"
     if draft.is_file():
@@ -181,7 +211,7 @@ def ocr_one(directory: Path, media_ocr: Path, python: str, threads: int, timeout
     env = {**os.environ, "OMP_NUM_THREADS": str(threads), "OpenBLAS_NUM_THREADS": str(threads), "MKL_NUM_THREADS": str(threads)}
     try:
         result = subprocess.run(
-            [python, str(media_ocr), "--input", str(directory), "--output", str(output)],
+            pinned_command([python, str(media_ocr), "--input", str(directory), "--output", str(output)], cpu_range),
             capture_output=True, text=True, timeout=timeout, env=env,
         )
     except subprocess.TimeoutExpired:
@@ -209,14 +239,29 @@ def ocr_phase(args: argparse.Namespace, out: Path, log_path: Path) -> dict[str, 
         if not (directory / "ocr-output" / "ocr-draft.md").is_file():
             pending.append(directory)
 
+    slices = cpu_slices(os.cpu_count() or 1, args.cpus_per_worker, args.workers)
     log(f"ocr phase: {len(pending)} item(s) pending, {len(video_only)} video-only item(s) not OCR'd", log_path)
+    log(f"ocr phase: {args.workers} worker(s), {args.cpus_per_worker} core(s) each → slices {', '.join(slices)}", log_path)
     results: list[dict[str, Any]] = []
     done = 0
+    slice_gate = threading.Lock()
+    slice_slots = list(slices)
+
+    def next_slice() -> str | None:
+        with slice_gate:
+            return slice_slots.pop(0) if slice_slots else None
+
+    def run_pinned(directory: Path) -> dict[str, Any]:
+        cpu_range = next_slice()
+        try:
+            return ocr_one(directory, media_ocr, python, args.ocr_threads, args.ocr_timeout, cpu_range)
+        finally:
+            if cpu_range:
+                with slice_gate:
+                    slice_slots.append(cpu_range)
+
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        futures = {
-            pool.submit(ocr_one, directory, media_ocr, python, args.ocr_threads, args.ocr_timeout): directory
-            for directory in pending
-        }
+        futures = {pool.submit(run_pinned, directory): directory for directory in pending}
         for future in as_completed(futures):
             outcome = future.result()
             results.append(outcome)
@@ -255,6 +300,7 @@ def video_phase(args: argparse.Namespace, out: Path, log_path: Path) -> dict[str
         "--input", str(out / "_inbox"),
         "--workers", str(args.video_workers),
         "--threads", str(args.ocr_threads),
+        "--cpus-per-worker", str(args.cpus_per_worker),
         "--timeout", str(args.ocr_timeout),
         "--report", str(report),
     ]
@@ -373,6 +419,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--max-wait", type=int, default=21600, help="longest cooldown to sit through (6h)")
     parser.add_argument("--workers", type=int, default=6)
     parser.add_argument("--ocr-threads", type=int, default=4)
+    parser.add_argument("--cpus-per-worker", type=int, default=5, help="cores pinned per OCR worker (default 5; bounds total CPU)")
     parser.add_argument("--ocr-timeout", type=int, default=900)
     parser.add_argument("--video-workers", type=int, default=3, help="clips processed concurrently (default 3)")
     parser.add_argument("--video-phase-timeout", type=int, default=86400, help="whole video phase cap in seconds")
